@@ -11,6 +11,9 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include <geometry_msgs/msg/twist.h>
+#include <nav_msgs/msg/odometry.h>
+
 extern ADC_HandleTypeDef hadc1;
 extern DAC_HandleTypeDef hdac1;
 
@@ -20,6 +23,10 @@ extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
 extern TIM_HandleTypeDef htim5;
 extern TIM_HandleTypeDef htim8;
+
+extern osMessageQueueId_t odomQueueHandle;
+extern osMessageQueueId_t twistQueueHandle;
+extern volatile float imuHeading;
 
 static const int16_t NUM_MOTORS = 6;
 static const MotorInstance motors[] = {
@@ -87,6 +94,8 @@ void updateEncoder(MotorInstance *motor, EncoderValues *encoder) {
 }
 
 float updatePID(PIDController *controller, PIDConstants *constants, float setpoint, float error, float limit) {
+	// TODO: consider using D term based on output instead of error
+
 	controller->integral += error * 0.001f;
 
 	if (controller->integral > limit) controller->integral = limit;
@@ -158,6 +167,25 @@ void StartControlTask(void *argument) {
 	const TickType_t xFrequency = pdMS_TO_TICKS(1);
 	TickType_t xLastWakeTime = xTaskGetTickCount();
 
+	geometry_msgs__msg__Twist twist_msg;
+
+	nav_msgs__msg__Odometry odom_msg;
+	nav_msgs__msg__Odometry__init(&odom_msg);
+	rosidl_runtime_c__String__assign(
+		&odom_msg.header.frame_id,
+		"odom");
+	rosidl_runtime_c__String__assign(
+		&odom_msg.child_frame_id,
+		"base_link");
+	odom_msg.pose.pose.position.z = 0.0;
+	odom_msg.pose.pose.orientation.x = 0.0;
+	odom_msg.pose.pose.orientation.y = 0.0;
+	odom_msg.twist.twist.linear.z = 0.0;
+	odom_msg.twist.twist.angular.x = 0.0;
+	odom_msg.twist.twist.angular.y = 0.0;
+
+	float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
+
 	for(;;) {
 	    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
@@ -166,20 +194,25 @@ void StartControlTask(void *argument) {
 			updateEncoder(&motors[i], &encoderValues[i]);
 		}
 
-		// Update velocity targets
-		float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
+		// Update motor velocities
+		// Check for new Twist message
+		osStatus_t status = osMessageQueueGet(twistQueueHandle, &twist_msg, NULL, 0);
 
-	    float inv_r = 1.0f / mecanumConfig.wheel_radius_m;
-	    float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
+		if (status == osOK) {
+			float inv_r = 1.0f / mecanumConfig.wheel_radius_m;
+			float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
 
-	    float v_x = velocityTarget[0], v_y = velocityTarget[1], v_z = velocityTarget[2];
+			float v_x = twist_msg.linear.x, v_y = twist_msg.linear.y, v_z = twist_msg.angular.z;
 
-	    velocitySetpoints[0] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f;
-	    velocitySetpoints[1] = (inv_r * (v_x + v_y + k * v_z));
-	    velocitySetpoints[2] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f;
-	    velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z));
+			velocitySetpoints[0] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f; // FL
+			velocitySetpoints[1] = (inv_r * (v_x + v_y + k * v_z)); // FR
+			velocitySetpoints[2] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f; // BL
+			velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z)); // BR
+		}
 
 		// Update motor setpoints
+	    // TODO: setpoint values should be normalized instead of clamped
+	    // Note: motor duty cycles should not exceed voltageScaler to prevent damage
 	    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
 	    float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
 	    float dutyCycles[4] = {0};
@@ -198,5 +231,25 @@ void StartControlTask(void *argument) {
 	    for (int i=0; i<4; i++) {
 	    	setMotorDutyCycle(&motors[i], dutyCycles[i]);
 	    }
+
+	    // Update forward kinematics
+	    // TODO: implement this
+
+	    uint64_t now = rmw_uros_epoch_millis();
+	    odom_msg.header.stamp.sec = now / 1000;
+	    odom_msg.header.stamp.nanosec = (now % 1000) * 1000000;
+
+	    odom_msg.pose.pose.position.x = 0.0;
+	    odom_msg.pose.pose.position.y = 0.0;
+	    odom_msg.pose.pose.orientation.z = sin(0.0 / 2.0);
+	    odom_msg.pose.pose.orientation.w = cos(0.0 / 2.0);
+
+	    odom_msg.twist.twist.linear.x = 0.0;
+	    odom_msg.twist.twist.linear.y = 0.0;
+	    odom_msg.twist.twist.angular.z = 0.0;
+
+
+	    osMessageQueueReset(odomQueueHandle);
+	    osMessageQueuePut(odomQueueHandle, &odom_msg, 0, 0);
 	}
 }

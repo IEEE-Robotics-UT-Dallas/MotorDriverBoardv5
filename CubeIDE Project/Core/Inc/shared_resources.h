@@ -12,5 +12,6 @@
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern volatile float imuHeading;
 
 #endif /* INC_SHARED_RESOURCES_H_ */

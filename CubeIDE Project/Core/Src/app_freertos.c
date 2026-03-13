@@ -49,6 +49,8 @@
 /* USER CODE BEGIN Variables */
 osMessageQueueId_t odomQueueHandle;
 osMessageQueueId_t twistQueueHandle;
+
+volatile float imuHeading = 0.0f;
 /* USER CODE END Variables */
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
