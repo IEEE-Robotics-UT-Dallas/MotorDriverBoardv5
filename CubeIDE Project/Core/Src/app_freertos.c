@@ -22,7 +22,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "shared_resources.h"
+#include <geometry_msgs/msg/twist.h>
+#include <nav_msgs/msg/odometry.h>
 
+#include "control_task.h"
+#include "uros_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,14 +47,22 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-
+osMessageQueueId_t odomQueueHandle;
+osMessageQueueId_t twistQueueHandle;
 /* USER CODE END Variables */
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
+  .priority = (osPriority_t) osPriorityRealtime,
+  .stack_size = 3000 * 4
+};
+/* Definitions for uROSTask */
+osThreadId_t uROSTaskHandle;
+const osThreadAttr_t uROSTask_attributes = {
+  .name = "uROSTask",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
+  .stack_size = 3000 * 4
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,10 +93,14 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  odomQueueHandle = osMessageQueueNew(1, sizeof(nav_msgs__msg__Odometry), NULL);
+  twistQueueHandle = osMessageQueueNew(1, sizeof(geometry_msgs__msg__Twist), NULL);
   /* USER CODE END RTOS_QUEUES */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);
+
+  /* creation of uROSTask */
+  uROSTaskHandle = osThreadNew(StartuROSTask, NULL, &uROSTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -93,23 +110,6 @@ void MX_FREERTOS_Init(void) {
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
-}
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-* @brief Function implementing the defaultTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-  /* USER CODE BEGIN defaultTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END defaultTask */
 }
 
 /* Private application code --------------------------------------------------*/

@@ -27,65 +27,6 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-// Config Types
-
-typedef struct{
-	GPIO_TypeDef *port;
-	uint16_t pin;
-} MotorDigitalPin;
-
-typedef struct{
-	TIM_HandleTypeDef *htim;
-    uint32_t channel;
-} MotorTimerChannel;
-
-typedef struct{
-    ADC_HandleTypeDef *hadc;
-    uint32_t channel;
-} MotorADCChannel;
-
-typedef struct{
-    DAC_HandleTypeDef *hdac;
-    uint32_t channel;
-} MotorDACChannel;
-
-typedef struct{
-	MotorTimerChannel en;
-	MotorDigitalPin ph;
-	MotorADCChannel ipropi;
-	TIM_HandleTypeDef *encoder_htim;
-} MotorInstance;
-
-typedef struct {
-    float wheel_radius_m;
-    float lx_m;
-    float ly_m;
-    float max_wheel_rad_s;
-    float encoder_ppr;
-    float gear_reduction;
-} MecanumConfig;
-
-typedef struct {
-    float kP;
-    float kI;
-    float kD;
-    float kF;
-} PIDConstants;
-
-typedef struct {
-    float integral;
-    float prevError;
-    float limit;
-} PIDController;
-
-// Data structures
-
-typedef struct{
-	int32_t delta_ticks;
-	int64_t position;
-	uint16_t last_counter_value;
-	float velocity_rad_s;
-} EncoderValues;
 
 /* USER CODE END PTD */
 
@@ -116,53 +57,9 @@ TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim8;
 
-PCD_HandleTypeDef hpcd_USB_DRD_FS;
+UART_HandleTypeDef huart4;
 
 /* USER CODE BEGIN PV */
-static const int16_t NUM_MOTORS = 6;
-static const MotorInstance motors[] = {
-	{{&htim8, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_4},  {&hadc1, ADC_CHANNEL_14}, &htim5},
-	{{&htim8, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_5},  {&hadc1, ADC_CHANNEL_15}, &htim3},
-	{{&htim8, TIM_CHANNEL_3}, {GPIOD, GPIO_PIN_2},  {&hadc1, ADC_CHANNEL_11}, &htim2},
-	{{&htim8, TIM_CHANNEL_4}, {GPIOC, GPIO_PIN_12}, {&hadc1, ADC_CHANNEL_10}, &htim4},
-	{{&htim1, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_13}, {&hadc1, ADC_CHANNEL_12}, NULL},
-	{{&htim1, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_14}, {&hadc1, ADC_CHANNEL_13}, NULL},
-};
-
-static const int32_t NUM_ENCODERS = 4;
-
-static const MecanumConfig mecanumConfig = {
-	65 * 0.5 * 0.001, //65mm wheel diameter
-	20 * 0.01 * 0.5, //20cm wheelbase front/rear
-	20 * 0.01 * 0.5, //20cm wheelbase left/right
-	200 * 0.1047, //205 RPM max speed
-	11, //11 PPR encoder
-	56, //1:30 Gear reduction
-};
-
-static const float PI = 3.1415927f;
-static const float ENCODER_VEL_CONSTANT = 2.0f * PI / (4.0f * mecanumConfig.encoder_ppr * mecanumConfig.gear_reduction * 0.001f);
-static const float ENCODER_ALPHA = 0.2;
-
-static const MotorDACChannel drvVref = {&hdac1, DAC_CHANNEL_1};
-static const MotorDACChannel accVref = {&hdac1, DAC_CHANNEL_2};
-
-static const MotorDigitalPin nSleep = {GPIOC, GPIO_PIN_11};
-static const MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
-static const MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
-
-static const PIDConstants pidConstants = {
-	0.0,
-	0.0,
-	0.0,
-	0.05
-};
-
-volatile EncoderValues encoderValues[4] = {0};
-volatile PIDController pidControllers[4] = {0};
-
-volatile uint16_t rawADCValues[7] = {0};
-volatile float velocityTarget[3] = {0, 0, 0};
 
 /* USER CODE END PV */
 
@@ -172,7 +69,6 @@ void PeriphCommonClock_Config(void);
 void MX_FREERTOS_Init(void);
 static void MX_GPIO_Init(void);
 static void MX_GPDMA1_Init(void);
-static void MX_USB_PCD_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_DAC1_Init(void);
 static void MX_SPI2_Init(void);
@@ -183,126 +79,14 @@ static void MX_TIM4_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_ICACHE_Init(void);
+static void MX_UART4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void updateEncoder(MotorInstance *motor, EncoderValues *encoder) {
-	if (motor->encoder_htim == NULL) return;
 
-	uint16_t timer_counter = __HAL_TIM_GET_COUNTER(motor->encoder_htim);
-
-	int32_t delta = (int32_t)(timer_counter - encoder->last_counter_value);
-	if (delta > 32767) {
-		delta -= 65536;
-	} else if (delta < -32768) {
-		delta += 65536;
-	}
-
-	encoder->delta_ticks = delta;
-	encoder->position += delta;
-	encoder->last_counter_value = timer_counter;
-
-	float raw_vel_rad_s = (float)delta * ENCODER_VEL_CONSTANT;
-
-	encoder->velocity_rad_s = (ENCODER_ALPHA * raw_vel_rad_s) + ((1.0f - ENCODER_ALPHA) * encoder->velocity_rad_s);
-
-	/*if ((encoder->velocity > 0) && __HAL_TIM_IS_TIM_COUNTING_DOWN(motor->encoder_htim)) {
-		(encoder->velocity) -= 0xFFFF;
-	} else if ((encoder->velocity < 0) && !__HAL_TIM_IS_TIM_COUNTING_DOWN(motor->encoder_htim)) {
-		(encoder->velocity) += 0xFFFF;
-	}*/
-}
-
-float updatePID(PIDController *controller, PIDConstants *constants, float setpoint, float error, float limit) {
-	controller->integral += error * 0.001f;
-
-	if (controller->integral > limit) controller->integral = limit;
-	else if (controller->integral < -limit) controller->integral = -limit;
-
-	float derivative = (error - controller->prevError);
-	controller->prevError = error;
-
-	float output = (constants->kP * error) + (constants->kI * controller->integral) + (constants->kD * derivative) + (constants->kF * setpoint);
-
-	if (output > 1.0f) output = 1.0f;
-	else if (output < -1.0f) output = -1.0f;
-
-	return output;
-}
-
-void setMotorDutyCycle(MotorInstance *motor, float dutyCycle)
-{
-	if (dutyCycle > 1.0f) dutyCycle = 1.0f;
-	else if (dutyCycle < -1.0f) dutyCycle = -1.0f;
-
-	uint32_t max = motor->en.htim->Init.Period;
-	uint32_t duty = (uint32_t)(fabsf(dutyCycle) * max);
-
-	if (dutyCycle > 0) {
-		HAL_GPIO_WritePin(motor->ph.port, motor->ph.pin, GPIO_PIN_SET);
-	} else {
-		HAL_GPIO_WritePin(motor->ph.port, motor->ph.pin, GPIO_PIN_RESET);
-	}
-	__HAL_TIM_SET_COMPARE(motor->en.htim, motor->en.channel, duty);
-}
-
-void setMotorsEnabled(uint8_t enabled) {
-	HAL_GPIO_WritePin(nSleep.port, nSleep.pin, enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-void setDrvVref(uint16_t value) {
-	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, value);
-}
-
-void setAccVref(uint16_t value) {
-	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R, value);
-}
-
-void controlTask() {
-	// Update encoders
-	for (int i=0; i<NUM_ENCODERS; i++) {
-		updateEncoder(&motors[i], &encoderValues[i]);
-	}
-
-	// Update velocity targets
-	float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
-
-    float inv_r = 1.0f / mecanumConfig.wheel_radius_m;
-    float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
-
-    float v_x = velocityTarget[0], v_y = velocityTarget[1], v_z = velocityTarget[2];
-
-    velocitySetpoints[0] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f;
-    velocitySetpoints[1] = (inv_r * (v_x + v_y + k * v_z));
-    velocitySetpoints[2] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f;
-    velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z));
-
-	// Update motor setpoints
-    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
-    float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
-    float dutyCycles[4] = {0};
-
-    for (int i=0; i<4; i++) {
-    	velocitySetpoints[i] = 10.0f;
-
-    	float error = velocitySetpoints[i] - encoderValues[i].velocity_rad_s;
-    	dutyCycles[i] = updatePID(&pidControllers[i], &pidConstants, velocitySetpoints[i], error, 1.0);
-
-    	dutyCycles[i] *= voltageScaler;
-    }
-
-    // Check current limits
-    // TODO: implement this
-
-	// Update PWM outputs
-    for (int i=0; i<4; i++) {
-    	setMotorDutyCycle(&motors[i], dutyCycles[i]);
-    }
-
-}
 /* USER CODE END 0 */
 
 /**
@@ -338,7 +122,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_GPDMA1_Init();
-  MX_USB_PCD_Init();
   MX_ADC1_Init();
   MX_DAC1_Init();
   MX_SPI2_Init();
@@ -349,29 +132,9 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM8_Init();
   MX_ICACHE_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)rawADCValues, 7);
-
-  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
-  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
-  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
-  HAL_TIM_Encoder_Start(&htim5, TIM_CHANNEL_ALL);
-
-  HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_4);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-
-  HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
-  HAL_DAC_Start(&hdac1, DAC_CHANNEL_2);
-
-  setDrvVref(4095);
-  setAccVref(4095);
-
-  setMotorsEnabled(1);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -413,11 +176,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_LSI
-                              |RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
-  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 25;
@@ -1099,38 +860,50 @@ static void MX_TIM8_Init(void)
 }
 
 /**
-  * @brief USB Initialization Function
+  * @brief UART4 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USB_PCD_Init(void)
+static void MX_UART4_Init(void)
 {
 
-  /* USER CODE BEGIN USB_Init 0 */
+  /* USER CODE BEGIN UART4_Init 0 */
 
-  /* USER CODE END USB_Init 0 */
+  /* USER CODE END UART4_Init 0 */
 
-  /* USER CODE BEGIN USB_Init 1 */
+  /* USER CODE BEGIN UART4_Init 1 */
 
-  /* USER CODE END USB_Init 1 */
-  hpcd_USB_DRD_FS.Instance = USB_DRD_FS;
-  hpcd_USB_DRD_FS.Init.dev_endpoints = 8;
-  hpcd_USB_DRD_FS.Init.speed = USBD_FS_SPEED;
-  hpcd_USB_DRD_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_DRD_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.battery_charging_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.bulk_doublebuffer_enable = DISABLE;
-  hpcd_USB_DRD_FS.Init.iso_singlebuffer_enable = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_DRD_FS) != HAL_OK)
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USB_Init 2 */
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
 
-  /* USER CODE END USB_Init 2 */
+  /* USER CODE END UART4_Init 2 */
 
 }
 
