@@ -17,8 +17,8 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
+#include "app_threadx.h"
 #include "main.h"
-#include "app_usbx_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -27,7 +27,7 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-// GPIO Types
+// Config Types
 
 typedef struct{
 	GPIO_TypeDef *port;
@@ -49,21 +49,44 @@ typedef struct{
     uint32_t channel;
 } MotorDACChannel;
 
-// Device types
-
-typedef struct{
-	TIM_HandleTypeDef *htim;
-
-	int32_t velocity;
-	int64_t position;
-	uint16_t last_counter_value;
-} EncoderInstance;
-
 typedef struct{
 	MotorTimerChannel en;
 	MotorDigitalPin ph;
 	MotorADCChannel ipropi;
+	TIM_HandleTypeDef *encoder_htim;
 } MotorInstance;
+
+typedef struct {
+    float wheel_radius_m;
+    float lx_m;
+    float ly_m;
+    float max_wheel_rad_s;
+    float encoder_ppr;
+    float gear_reduction;
+} MecanumConfig;
+
+typedef struct {
+    float kP;
+    float kI;
+    float kD;
+    float kF;
+} PIDConstants;
+
+typedef struct {
+    float integral;
+    float prevError;
+    float limit;
+} PIDController;
+
+// Data structures
+
+typedef struct{
+	int32_t delta_ticks;
+	int64_t position;
+	uint16_t last_counter_value;
+	float velocity_rad_s;
+} EncoderValues;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -96,32 +119,50 @@ TIM_HandleTypeDef htim8;
 PCD_HandleTypeDef hpcd_USB_DRD_FS;
 
 /* USER CODE BEGIN PV */
-int16_t NUM_MOTORS = 6;
-MotorInstance motors[] = {
-	{{&htim8, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_4},  {&hadc1, ADC_CHANNEL_14}},
-	{{&htim8, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_5},  {&hadc1, ADC_CHANNEL_15}},
-	{{&htim8, TIM_CHANNEL_3}, {GPIOD, GPIO_PIN_2},  {&hadc1, ADC_CHANNEL_11}},
-	{{&htim8, TIM_CHANNEL_4}, {GPIOC, GPIO_PIN_12}, {&hadc1, ADC_CHANNEL_10}},
-	{{&htim1, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_13}, {&hadc1, ADC_CHANNEL_12}},
-	{{&htim1, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_14}, {&hadc1, ADC_CHANNEL_13}},
+static const int16_t NUM_MOTORS = 6;
+static const MotorInstance motors[] = {
+	{{&htim8, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_4},  {&hadc1, ADC_CHANNEL_14}, &htim5},
+	{{&htim8, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_5},  {&hadc1, ADC_CHANNEL_15}, &htim3},
+	{{&htim8, TIM_CHANNEL_3}, {GPIOD, GPIO_PIN_2},  {&hadc1, ADC_CHANNEL_11}, &htim2},
+	{{&htim8, TIM_CHANNEL_4}, {GPIOC, GPIO_PIN_12}, {&hadc1, ADC_CHANNEL_10}, &htim4},
+	{{&htim1, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_13}, {&hadc1, ADC_CHANNEL_12}, NULL},
+	{{&htim1, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_14}, {&hadc1, ADC_CHANNEL_13}, NULL},
 };
 
-int32_t NUM_ENCODERS = 4;
-volatile EncoderInstance encoders[] = {
-	{&htim5, 0, 0, 0},
-	{&htim3, 0, 0, 0},
-	{&htim2, 0, 0, 0},
-	{&htim4, 0, 0, 0}
+static const int32_t NUM_ENCODERS = 4;
+
+static const MecanumConfig mecanumConfig = {
+	65 * 0.5 * 0.001, //65mm wheel diameter
+	20 * 0.01 * 0.5, //20cm wheelbase front/rear
+	20 * 0.01 * 0.5, //20cm wheelbase left/right
+	200 * 0.1047, //205 RPM max speed
+	11, //11 PPR encoder
+	56, //1:30 Gear reduction
 };
+
+static const float PI = 3.1415927f;
+static const float ENCODER_VEL_CONSTANT = 2.0f * PI / (4.0f * mecanumConfig.encoder_ppr * mecanumConfig.gear_reduction * 0.001f);
+static const float ENCODER_ALPHA = 0.2;
+
+static const MotorDACChannel drvVref = {&hdac1, DAC_CHANNEL_1};
+static const MotorDACChannel accVref = {&hdac1, DAC_CHANNEL_2};
+
+static const MotorDigitalPin nSleep = {GPIOC, GPIO_PIN_11};
+static const MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
+static const MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
+
+static const PIDConstants pidConstants = {
+	0.0,
+	0.0,
+	0.0,
+	0.05
+};
+
+volatile EncoderValues encoderValues[4] = {0};
+volatile PIDController pidControllers[4] = {0};
 
 volatile uint16_t rawADCValues[7] = {0};
-
-MotorDACChannel drvVref = {&hdac1, DAC_CHANNEL_1};
-MotorDACChannel accVref = {&hdac1, DAC_CHANNEL_2};
-
-MotorDigitalPin nSleep = {GPIOC, GPIO_PIN_11};
-MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
-MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
+volatile float velocityTarget[3] = {0, 0, 0};
 
 /* USER CODE END PV */
 
@@ -140,33 +181,61 @@ static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_TIM8_Init(void);
+static void MX_ICACHE_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void updateEncoder(EncoderInstance *encoder) {
-	uint16_t timer_counter = __HAL_TIM_GET_COUNTER(encoder->htim);
-	(encoder -> velocity) = (int32_t)(timer_counter - encoder->last_counter_value);
+void updateEncoder(MotorInstance *motor, EncoderValues *encoder) {
+	if (motor->encoder_htim == NULL) return;
 
-	if ((encoder->velocity > 0) && __HAL_TIM_IS_TIM_COUNTING_DOWN(encoder -> htim)) {
-		(encoder->velocity) -= 0xFFFF;
-	} else if ((encoder->velocity < 0) && !__HAL_TIM_IS_TIM_COUNTING_DOWN(encoder -> htim)) {
-		(encoder->velocity) += 0xFFFF;
+	uint16_t timer_counter = __HAL_TIM_GET_COUNTER(motor->encoder_htim);
+
+	int32_t delta = (int32_t)(timer_counter - encoder->last_counter_value);
+	if (delta > 32767) {
+		delta -= 65536;
+	} else if (delta < -32768) {
+		delta += 65536;
 	}
 
-	(encoder -> position) += (encoder -> velocity);
-	(encoder -> last_counter_value) = timer_counter;
+	encoder->delta_ticks = delta;
+	encoder->position += delta;
+	encoder->last_counter_value = timer_counter;
+
+	float raw_vel_rad_s = (float)delta * ENCODER_VEL_CONSTANT;
+
+	encoder->velocity_rad_s = (ENCODER_ALPHA * raw_vel_rad_s) + ((1.0f - ENCODER_ALPHA) * encoder->velocity_rad_s);
+
+	/*if ((encoder->velocity > 0) && __HAL_TIM_IS_TIM_COUNTING_DOWN(motor->encoder_htim)) {
+		(encoder->velocity) -= 0xFFFF;
+	} else if ((encoder->velocity < 0) && !__HAL_TIM_IS_TIM_COUNTING_DOWN(motor->encoder_htim)) {
+		(encoder->velocity) += 0xFFFF;
+	}*/
+}
+
+float updatePID(PIDController *controller, PIDConstants *constants, float setpoint, float error, float limit) {
+	controller->integral += error * 0.001f;
+
+	if (controller->integral > limit) controller->integral = limit;
+	else if (controller->integral < -limit) controller->integral = -limit;
+
+	float derivative = (error - controller->prevError);
+	controller->prevError = error;
+
+	float output = (constants->kP * error) + (constants->kI * controller->integral) + (constants->kD * derivative) + (constants->kF * setpoint);
+
+	if (output > 1.0f) output = 1.0f;
+	else if (output < -1.0f) output = -1.0f;
+
+	return output;
 }
 
 void setMotorDutyCycle(MotorInstance *motor, float dutyCycle)
 {
 	if (dutyCycle > 1.0f) dutyCycle = 1.0f;
-	if (dutyCycle < -1.0f) dutyCycle = -1.0f;
-
-	//Reduce output to account for battery voltage
-	dutyCycle *= 1.0f;
+	else if (dutyCycle < -1.0f) dutyCycle = -1.0f;
 
 	uint32_t max = motor->en.htim->Init.Period;
 	uint32_t duty = (uint32_t)(fabsf(dutyCycle) * max);
@@ -191,29 +260,47 @@ void setAccVref(uint16_t value) {
 	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R, value);
 }
 
-void sweepMotors(float start, float end, float step, uint32_t delay_ms)
-{
-    if (start < end) {
-        for (float d = start; d <= end; d += step) {
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                setMotorDutyCycle(&motors[i], d);
-            }
-            HAL_Delay(delay_ms);
-            for(int i=0; i<NUM_ENCODERS; i++) {
-            	updateEncoder(&encoders[i]);
-            }
-        }
-    } else {
-        for (float d = start; d >= end; d -= step) {
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                setMotorDutyCycle(&motors[i], d);
-            }
-            HAL_Delay(delay_ms);
-            for(int i=0; i<NUM_ENCODERS; i++) {
-            	updateEncoder(&encoders[i]);
-            }
-        }
+void controlTask() {
+	// Update encoders
+	for (int i=0; i<NUM_ENCODERS; i++) {
+		updateEncoder(&motors[i], &encoderValues[i]);
+	}
+
+	// Update velocity targets
+	float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
+
+    float inv_r = 1.0f / mecanumConfig.wheel_radius_m;
+    float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
+
+    float v_x = velocityTarget[0], v_y = velocityTarget[1], v_z = velocityTarget[2];
+
+    velocitySetpoints[0] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f;
+    velocitySetpoints[1] = (inv_r * (v_x + v_y + k * v_z));
+    velocitySetpoints[2] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f;
+    velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z));
+
+	// Update motor setpoints
+    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
+    float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
+    float dutyCycles[4] = {0};
+
+    for (int i=0; i<4; i++) {
+    	velocitySetpoints[i] = 10.0f;
+
+    	float error = velocitySetpoints[i] - encoderValues[i].velocity_rad_s;
+    	dutyCycles[i] = updatePID(&pidControllers[i], &pidConstants, velocitySetpoints[i], error, 1.0);
+
+    	dutyCycles[i] *= voltageScaler;
     }
+
+    // Check current limits
+    // TODO: implement this
+
+	// Update PWM outputs
+    for (int i=0; i<4; i++) {
+    	setMotorDutyCycle(&motors[i], dutyCycles[i]);
+    }
+
 }
 /* USER CODE END 0 */
 
@@ -259,9 +346,10 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
-  MX_USBX_Device_Init();
   MX_TIM8_Init();
+  MX_ICACHE_Init();
   /* USER CODE BEGIN 2 */
+
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)rawADCValues, 7);
 
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
@@ -285,21 +373,15 @@ int main(void)
   setMotorsEnabled(1);
   /* USER CODE END 2 */
 
+  /* We should never get here as control is now taken by the scheduler */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
-	sweepMotors(0.0f, 1.0f, 0.01f, 5);   // 0 -> 1
-	sweepMotors(1.0f, -1.0f, 0.01f, 5);  // 1 -> -1
-	sweepMotors(-1.0f, 0.0f, 0.01f, 5);  // -1 -> 0
-
-    //for (int i = 0; i < NUM_MOTORS; i++) {
-    //  setMotorDutyCycle(&motors[i], 1.0);
-    //}
-    //for(int i=0; i<NUM_ENCODERS; i++) {
-  	//  updateEncoder(&encoders[i]);
-    //}
+	  controlTask();
+	  HAL_Delay(1);
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -573,6 +655,34 @@ static void MX_GPDMA1_Init(void)
   /* USER CODE BEGIN GPDMA1_Init 2 */
 
   /* USER CODE END GPDMA1_Init 2 */
+
+}
+
+/**
+  * @brief ICACHE Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ICACHE_Init(void)
+{
+
+  /* USER CODE BEGIN ICACHE_Init 0 */
+
+  /* USER CODE END ICACHE_Init 0 */
+
+  /* USER CODE BEGIN ICACHE_Init 1 */
+
+  /* USER CODE END ICACHE_Init 1 */
+
+  /** Enable instruction cache (default 2-ways set associative cache)
+  */
+  if (HAL_ICACHE_Enable() != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ICACHE_Init 2 */
+
+  /* USER CODE END ICACHE_Init 2 */
 
 }
 
@@ -1088,6 +1198,28 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM17 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM17)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

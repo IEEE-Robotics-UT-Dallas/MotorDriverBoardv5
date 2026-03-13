@@ -43,23 +43,17 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-/* USER CODE BEGIN UX_Device_Memory_Buffer */
-
-/* USER CODE END UX_Device_Memory_Buffer */
-#if defined ( __ICCARM__ )
-#pragma data_alignment=4
-#endif
-__ALIGN_BEGIN static UCHAR ux_device_byte_pool_buffer[UX_DEVICE_APP_MEM_POOL_SIZE] __ALIGN_END;
-
 static ULONG cdc_acm_interface_number;
 static ULONG cdc_acm_configuration_number;
 static UX_SLAVE_CLASS_CDC_ACM_PARAMETER cdc_acm_parameter;
+static TX_THREAD ux_device_app_thread;
 
 /* USER CODE BEGIN PV */
-
+extern PCD_HandleTypeDef hpcd_USB_DRD_FS;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+static VOID app_ux_device_thread_entry(ULONG thread_input);
 static UINT USBD_ChangeFunction(ULONG Device_State);
 /* USER CODE BEGIN PFP */
 
@@ -67,11 +61,11 @@ static UINT USBD_ChangeFunction(ULONG Device_State);
 
 /**
   * @brief  Application USBX Device Initialization.
-  * @param  none
+  * @param  memory_ptr: memory pointer
   * @retval status
   */
 
-UINT MX_USBX_Device_Init(VOID)
+UINT MX_USBX_Device_Init(VOID *memory_ptr)
 {
    UINT ret = UX_SUCCESS;
   UCHAR *device_framework_high_speed;
@@ -84,11 +78,19 @@ UINT MX_USBX_Device_Init(VOID)
   UCHAR *language_id_framework;
 
   UCHAR *pointer;
+  TX_BYTE_POOL *byte_pool = (TX_BYTE_POOL*)memory_ptr;
 
   /* USER CODE BEGIN MX_USBX_Device_Init0 */
 
   /* USER CODE END MX_USBX_Device_Init0 */
-  pointer = ux_device_byte_pool_buffer;
+  /* Allocate the stack for USBX Memory */
+  if (tx_byte_allocate(byte_pool, (VOID **) &pointer,
+                       USBX_DEVICE_MEMORY_STACK_SIZE, TX_NO_WAIT) != TX_SUCCESS)
+  {
+    /* USER CODE BEGIN USBX_ALLOCATE_STACK_ERROR */
+    return TX_POOL_ERROR;
+    /* USER CODE END USBX_ALLOCATE_STACK_ERROR */
+  }
 
   /* Initialize USBX Memory */
   if (ux_system_initialize(pointer, USBX_DEVICE_MEMORY_STACK_SIZE, UX_NULL, 0) != UX_SUCCESS)
@@ -155,6 +157,26 @@ UINT MX_USBX_Device_Init(VOID)
     /* USER CODE END USBX_DEVICE_CDC_ACM_REGISTER_ERROR */
   }
 
+  /* Allocate the stack for device application main thread */
+  if (tx_byte_allocate(byte_pool, (VOID **) &pointer, UX_DEVICE_APP_THREAD_STACK_SIZE,
+                       TX_NO_WAIT) != TX_SUCCESS)
+  {
+    /* USER CODE BEGIN MAIN_THREAD_ALLOCATE_STACK_ERROR */
+    return TX_POOL_ERROR;
+    /* USER CODE END MAIN_THREAD_ALLOCATE_STACK_ERROR */
+  }
+
+  /* Create the device application main thread */
+  if (tx_thread_create(&ux_device_app_thread, UX_DEVICE_APP_THREAD_NAME, app_ux_device_thread_entry,
+                       0, pointer, UX_DEVICE_APP_THREAD_STACK_SIZE, UX_DEVICE_APP_THREAD_PRIO,
+                       UX_DEVICE_APP_THREAD_PREEMPTION_THRESHOLD, UX_DEVICE_APP_THREAD_TIME_SLICE,
+                       UX_DEVICE_APP_THREAD_START_OPTION) != TX_SUCCESS)
+  {
+    /* USER CODE BEGIN MAIN_THREAD_CREATE_ERROR */
+    return TX_THREAD_ERROR;
+    /* USER CODE END MAIN_THREAD_CREATE_ERROR */
+  }
+
   /* USER CODE BEGIN MX_USBX_Device_Init1 */
 
   /* USER CODE END MX_USBX_Device_Init1 */
@@ -163,51 +185,18 @@ UINT MX_USBX_Device_Init(VOID)
 }
 
 /**
-  * @brief  _ux_utility_interrupt_disable
-  *         USB utility interrupt disable.
-  * @param  none
+  * @brief  Function implementing app_ux_device_thread_entry.
+  * @param  thread_input: User thread input parameter.
   * @retval none
   */
-ALIGN_TYPE _ux_utility_interrupt_disable(VOID)
+static VOID app_ux_device_thread_entry(ULONG thread_input)
 {
-  UINT interrupt_save;
-  /* USER CODE BEGIN _ux_utility_interrupt_disable */
-  interrupt_save = __get_PRIMASK();
-  __disable_irq();
-  /* USER CODE END _ux_utility_interrupt_disable */
+  /* USER CODE BEGIN app_ux_device_thread_entry */
+  TX_PARAMETER_NOT_USED(thread_input);
 
-  return interrupt_save;
-}
-
-/**
-  * @brief  _ux_utility_interrupt_restore
-  *         USB utility interrupt restore.
-  * @param  flags
-  * @retval none
-  */
-VOID _ux_utility_interrupt_restore(ALIGN_TYPE flags)
-{
-
-  /* USER CODE BEGIN _ux_utility_interrupt_restore */
-  __set_PRIMASK(flags);
-  /* USER CODE END _ux_utility_interrupt_restore */
-}
-
-/**
-  * @brief  _ux_utility_time_get
-  *         Get Time Tick for host timing.
-  * @param  none
-  * @retval time tick
-  */
-ULONG _ux_utility_time_get(VOID)
-{
-  ULONG time_tick = 0U;
-
-  /* USER CODE BEGIN _ux_utility_time_get */
-
-  /* USER CODE END _ux_utility_time_get */
-
-  return time_tick;
+  ux_dcd_stm32_initialize((ULONG)USB_DRD_FS, (ULONG)&hpcd_USB_DRD_FS);
+  HAL_PCD_Start(&hpcd_USB_DRD_FS);
+  /* USER CODE END app_ux_device_thread_entry */
 }
 
 /**
