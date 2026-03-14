@@ -19,6 +19,8 @@
 // --- micro-ROS Transports ---
 #define UART_DMA_BUFFER_SIZE 2048
 
+extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
+
 static uint8_t dma_buffer[UART_DMA_BUFFER_SIZE];
 static size_t dma_head = 0, dma_tail = 0;
 
@@ -36,6 +38,9 @@ bool cubemx_transport_close(struct uxrCustomTransport * transport){
 
 size_t cubemx_transport_write(struct uxrCustomTransport* transport, uint8_t * buf, size_t len, uint8_t * err){
     UART_HandleTypeDef * uart = (UART_HandleTypeDef*) transport->args;
+
+    //HAL_UART_Transmit(uart, buf, len, 100);
+    //return len;
 
     HAL_StatusTypeDef ret;
     if (uart->gState == HAL_UART_STATE_READY){
@@ -57,20 +62,21 @@ size_t cubemx_transport_read(struct uxrCustomTransport* transport, uint8_t* buf,
     do
     {
         __disable_irq();
-        dma_tail = UART_DMA_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(uart->hdmarx);
+        uint32_t remaining = (handle_GPDMA1_Channel1.Instance->CBR1) & 0x0000FFFFU;
+        dma_tail = UART_DMA_BUFFER_SIZE - remaining;
         __enable_irq();
         ms_used++;
         osDelay(portTICK_RATE_MS);
     } while (dma_head == dma_tail && ms_used < timeout);
-    
+
     size_t wrote = 0;
     while ((dma_head != dma_tail) && (wrote < len)){
         buf[wrote] = dma_buffer[dma_head];
         dma_head = (dma_head + 1) % UART_DMA_BUFFER_SIZE;
         wrote++;
     }
-    
-    return wrote;
+
+	return wrote;
 }
 
 #endif //RMW_UXRCE_TRANSPORT_CUSTOM

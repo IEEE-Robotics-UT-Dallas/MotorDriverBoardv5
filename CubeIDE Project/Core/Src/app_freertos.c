@@ -48,7 +48,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-extern hspi2;
+extern SPI_HandleTypeDef hspi2;
 
 osMessageQueueId_t odomQueueHandle;
 osMessageQueueId_t twistQueueHandle;
@@ -81,6 +81,18 @@ const osThreadAttr_t imuTask_attributes = {
 /* USER CODE BEGIN FunctionPrototypes */
 
 /* USER CODE END FunctionPrototypes */
+
+/* USER CODE BEGIN 4 */
+void vApplicationStackOverflowHook(xTaskHandle xTask, char *pcTaskName)
+{
+   /* Run time stack overflow checking is performed if
+   configCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2. This hook function is
+   called if a stack overflow is detected. */
+    volatile char taskName[16];
+    strncpy((char*)taskName, pcTaskName, 16);
+    __BKPT(0); // Debugger stops here, read taskName
+}
+/* USER CODE END 4 */
 
 /**
   * @brief  FreeRTOS initialization

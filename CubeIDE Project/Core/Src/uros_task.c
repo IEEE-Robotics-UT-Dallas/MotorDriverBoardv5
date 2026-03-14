@@ -73,6 +73,10 @@ void StartuROSTask(void *argument) {
 		cubemx_transport_read
 	);
 
+    //while (rmw_uros_ping_agent(100, 10) != RMW_RET_OK) {
+    //    osDelay(100);
+    //}
+
 	rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();
 	freeRTOS_allocator.allocate = microros_allocate;
 	freeRTOS_allocator.deallocate = microros_deallocate;

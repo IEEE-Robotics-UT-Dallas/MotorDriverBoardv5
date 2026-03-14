@@ -54,6 +54,9 @@ void UsageFault_Handler(void);
 void DebugMon_Handler(void);
 void EXTI10_IRQHandler(void);
 void GPDMA1_Channel0_IRQHandler(void);
+void GPDMA1_Channel1_IRQHandler(void);
+void GPDMA1_Channel2_IRQHandler(void);
+void UART4_IRQHandler(void);
 void TIM17_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 

@@ -204,9 +204,9 @@ void StartControlTask(void *argument) {
 	const TickType_t xFrequency = pdMS_TO_TICKS(1);
 	TickType_t xLastWakeTime = xTaskGetTickCount();
 
-	geometry_msgs__msg__Twist twist_msg;
+	static geometry_msgs__msg__Twist twist_msg;
 
-	nav_msgs__msg__Odometry odom_msg;
+	static nav_msgs__msg__Odometry odom_msg;
 	nav_msgs__msg__Odometry__init(&odom_msg);
 	rosidl_runtime_c__String__assign(
 		&odom_msg.header.frame_id,
@@ -285,9 +285,9 @@ void StartControlTask(void *argument) {
 	    // Update forward kinematics
 	    // TODO: implement this
 
-	    uint64_t now = rmw_uros_epoch_millis();
-	    odom_msg.header.stamp.sec = now / 1000;
-	    odom_msg.header.stamp.nanosec = (now % 1000) * 1000000;
+		uint64_t now = (uint64_t)xTaskGetTickCount();
+		odom_msg.header.stamp.sec = now / 1000;
+		odom_msg.header.stamp.nanosec = (now % 1000) * 1000000;
 
 		updateForwardKinematics(&odom_msg);
 
