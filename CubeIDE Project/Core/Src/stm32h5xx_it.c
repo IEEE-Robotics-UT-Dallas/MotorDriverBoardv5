@@ -22,6 +22,7 @@
 #include "stm32h5xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bno085.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +52,7 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+extern BNO085_t bno085;
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -163,6 +164,20 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles EXTI Line10 interrupt.
+  */
+void EXTI10_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI10_IRQn 0 */
+
+  /* USER CODE END EXTI10_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_10);
+  /* USER CODE BEGIN EXTI10_IRQn 1 */
+
+  /* USER CODE END EXTI10_IRQn 1 */
+}
+
+/**
   * @brief This function handles GPDMA1 Channel 0 global interrupt.
   */
 void GPDMA1_Channel0_IRQHandler(void)
@@ -191,5 +206,9 @@ void TIM17_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+    if (GPIO_Pin == BNO085_INT_PIN) {
+        BNO085_INT_Callback(&bno085);
+    }
+}
 /* USER CODE END 1 */

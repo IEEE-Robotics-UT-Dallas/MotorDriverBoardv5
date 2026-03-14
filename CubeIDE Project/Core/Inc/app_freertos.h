@@ -56,6 +56,7 @@ extern "C" {
 /* USER CODE END EM */
 extern osThreadId_t controlTaskHandle;
 extern osThreadId_t uROSTaskHandle;
+extern osThreadId_t imuTaskHandle;
 
 /* Exported function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -64,6 +65,7 @@ extern osThreadId_t uROSTaskHandle;
 
 extern void StartControlTask(void *argument);
 extern void StartuROSTask(void *argument);
+extern void StartIMUTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 

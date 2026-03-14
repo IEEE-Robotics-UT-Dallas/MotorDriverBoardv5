@@ -28,6 +28,7 @@
 
 #include "control_task.h"
 #include "uros_task.h"
+#include "uros_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,6 +48,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+extern hspi2;
+
 osMessageQueueId_t odomQueueHandle;
 osMessageQueueId_t twistQueueHandle;
 
@@ -66,6 +69,13 @@ const osThreadAttr_t uROSTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 3000 * 4
 };
+/* Definitions for imuTask */
+osThreadId_t imuTaskHandle;
+const osThreadAttr_t imuTask_attributes = {
+  .name = "imuTask",
+  .priority = (osPriority_t) osPriorityHigh,
+  .stack_size = 256 * 4
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -79,7 +89,6 @@ const osThreadAttr_t uROSTask_attributes = {
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -103,6 +112,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of uROSTask */
   uROSTaskHandle = osThreadNew(StartuROSTask, NULL, &uROSTask_attributes);
+
+  /* creation of imuTask */
+  imuTaskHandle = osThreadNew(StartIMUTask, NULL, &imuTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
