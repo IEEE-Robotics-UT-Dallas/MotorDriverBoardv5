@@ -28,6 +28,9 @@ extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
 extern volatile float imuHeading;
 
+static volatile float odom_x = 0.0f;
+static volatile float odom_y = 0.0f;
+
 static const int16_t NUM_MOTORS = 6;
 static const MotorInstance motors[] = {
 	{{&htim8, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_4},  {&hadc1, ADC_CHANNEL_14}, &htim5},
@@ -106,10 +109,44 @@ float updatePID(PIDController *controller, PIDConstants *constants, float setpoi
 
 	float output = (constants->kP * error) + (constants->kI * controller->integral) + (constants->kD * derivative) + (constants->kF * setpoint);
 
-	if (output > 1.0f) output = 1.0f;
-	else if (output < -1.0f) output = -1.0f;
-
 	return output;
+}
+
+void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
+    // Wheel velocities in rad/s (FL, FR, BL, BR)
+    float w_fl = encoderValues[0].velocity_rad_s;
+    float w_fr = encoderValues[1].velocity_rad_s;
+    float w_bl = encoderValues[2].velocity_rad_s;
+    float w_br = encoderValues[3].velocity_rad_s;
+
+    float r = mecanumConfig.wheel_radius_m;
+    float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
+
+    // Mecanum forward kinematics (body-frame velocities)
+    float v_x =  r * 0.25f * ( w_fl + w_fr + w_bl + w_br) * -1.0f;
+    float v_y =  r * 0.25f * (-w_fl + w_fr + w_bl - w_br) * -1.0f;
+    float v_z =  r * 0.25f * (-w_fl + w_fr - w_bl + w_br) / k;
+
+    // Rotate body-frame linear velocity into odom frame using IMU heading
+    float cos_h = cosf(imuHeading);
+    float sin_h = sinf(imuHeading);
+    float v_x_odom = v_x * cos_h - v_y * sin_h;
+    float v_y_odom = v_x * sin_h + v_y * cos_h;
+
+    // Integrate position (dt = 1ms = 0.001s)
+    odom_x += v_x_odom * 0.001f;
+    odom_y += v_y_odom * 0.001f;
+
+    // Position
+    odom->pose.pose.position.x = odom_x;
+    odom->pose.pose.position.y = odom_y;
+    odom->pose.pose.orientation.z = sinf(imuHeading / 2.0f);
+    odom->pose.pose.orientation.w = cosf(imuHeading / 2.0f);
+
+    // Velocity (body frame, as is convention for twist in odom message)
+    odom->twist.twist.linear.x = v_x;
+    odom->twist.twist.linear.y = v_y;
+    odom->twist.twist.angular.z = v_z;
 }
 
 void setMotorDutyCycle(MotorInstance *motor, float dutyCycle)
@@ -197,7 +234,6 @@ void StartControlTask(void *argument) {
 		// Update motor velocities
 		// Check for new Twist message
 		osStatus_t status = osMessageQueueGet(twistQueueHandle, &twist_msg, NULL, 0);
-
 		if (status == osOK) {
 			float inv_r = 1.0f / mecanumConfig.wheel_radius_m;
 			float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
@@ -211,18 +247,32 @@ void StartControlTask(void *argument) {
 		}
 
 		// Update motor setpoints
-	    // TODO: setpoint values should be normalized instead of clamped
 	    // Note: motor duty cycles should not exceed voltageScaler to prevent damage
 	    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
-	    float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
+		float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
+
+		if (voltageScaler > 0.75f) voltageScaler = 0.75f; // Maximum safe value 
+
 	    float dutyCycles[4] = {0};
 
 	    for (int i=0; i<4; i++) {
 	    	float error = velocitySetpoints[i] - encoderValues[i].velocity_rad_s;
 	    	dutyCycles[i] = updatePID(&pidControllers[i], &pidConstants, velocitySetpoints[i], error, 1.0);
-
-	    	dutyCycles[i] *= voltageScaler;
 	    }
+
+		// If any duty cycle exceeds rated motor voltage, scale them all down proportionally to prevent damage
+		// and maintain commanded velocity directionality.
+		float maxDuty = 0.0f;
+		for (int i = 0; i < 4; i++) {
+			float absDuty = fabsf(dutyCycles[i]);
+			if (absDuty > maxDuty) maxDuty = absDuty;
+		}
+		if (maxDuty > voltageScaler) {
+			float scale = voltageScaler / maxDuty;
+			for (int i = 0; i < 4; i++) {
+				dutyCycles[i] *= scale;
+			}
+		}
 
 	    // Check current limits
 	    // TODO: implement this
@@ -239,15 +289,7 @@ void StartControlTask(void *argument) {
 	    odom_msg.header.stamp.sec = now / 1000;
 	    odom_msg.header.stamp.nanosec = (now % 1000) * 1000000;
 
-	    odom_msg.pose.pose.position.x = 0.0;
-	    odom_msg.pose.pose.position.y = 0.0;
-	    odom_msg.pose.pose.orientation.z = sin(0.0 / 2.0);
-	    odom_msg.pose.pose.orientation.w = cos(0.0 / 2.0);
-
-	    odom_msg.twist.twist.linear.x = 0.0;
-	    odom_msg.twist.twist.linear.y = 0.0;
-	    odom_msg.twist.twist.angular.z = 0.0;
-
+		updateForwardKinematics(&odom_msg);
 
 	    osMessageQueueReset(odomQueueHandle);
 	    osMessageQueuePut(odomQueueHandle, &odom_msg, 0, 0);
