@@ -21,6 +21,7 @@
 #include <rosidl_runtime_c/string_functions.h>
 #include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
+#include <std_msgs/msg/float32_multi_array.h>
 
 bool cubemx_transport_open(struct uxrCustomTransport * transport);
 bool cubemx_transport_close(struct uxrCustomTransport * transport);
@@ -36,9 +37,14 @@ extern UART_HandleTypeDef huart4;
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern osMessageQueueId_t telemetryQueueHandle;
 
 rcl_timer_t odom_timer;
 rcl_publisher_t odom_pub;
+
+rcl_timer_t telemetry_timer;
+rcl_publisher_t telemetry_pub;
+
 rcl_subscription_t twist_sub;
 
 void twist_sub_callback(const void * msgin)
@@ -60,6 +66,35 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 
 	if (status == osOK) {
 		rcl_publish(&odom_pub, &msg, NULL);
+	}
+}
+
+void telemetry_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{
+	(void) timer;
+	(void) last_call_time;
+
+	static float telemetry_data[TELEMETRY_SIZE];
+	osStatus_t status = osMessageQueueGet(telemetryQueueHandle, &telemetry_data, NULL, 0);
+
+	if (status == osOK) {
+		std_msgs__msg__Float32MultiArray msg = {0};
+
+	    static std_msgs__msg__MultiArrayDimension dim[1] = {0};
+	    dim[0].size     = TELEMETRY_SIZE;
+	    dim[0].stride   = TELEMETRY_SIZE;
+	    rosidl_runtime_c__String__assign(&dim[0].label, "");
+
+	    msg.layout.dim.data     = dim;
+	    msg.layout.dim.size     = 1;
+	    msg.layout.dim.capacity = 1;
+	    msg.layout.data_offset   = 0;
+
+	    msg.data.data     = telemetry_data;
+	    msg.data.size     = TELEMETRY_SIZE;
+	    msg.data.capacity = TELEMETRY_SIZE;
+
+	    rcl_publish(&telemetry_pub, &msg, NULL);
 	}
 }
 
@@ -102,7 +137,7 @@ void StartuROSTask(void *argument) {
 		&odom_pub,
 		&node,
 		ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-		"odometry_publisher"
+		"odom"
 	);
 
 	rclc_timer_init_default2(
@@ -113,15 +148,31 @@ void StartuROSTask(void *argument) {
 	  true
    );
 
+	rclc_publisher_init_default(
+		&telemetry_pub,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+		"telemetry"
+	);
+
+	rclc_timer_init_default2(
+      &telemetry_timer,
+      &support,
+      RCL_MS_TO_NS(100),
+      telemetry_timer_callback,
+	  true
+   );
+
 	rclc_subscription_init_default(
 		&twist_sub,
 		&node,
 		ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-		"velocity_subscriber"
+		"cmd_vel"
 	);
 
-	rclc_executor_init(&executor, &support.context, 2, &allocator);
+	rclc_executor_init(&executor, &support.context, 3, &allocator);
 	rclc_executor_add_timer(&executor, &odom_timer);
+	rclc_executor_add_timer(&executor, &telemetry_timer);
 	static geometry_msgs__msg__Twist twist_msg;
 	rclc_executor_add_subscription(
 		&executor,

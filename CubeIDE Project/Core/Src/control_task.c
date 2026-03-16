@@ -26,12 +26,13 @@ extern TIM_HandleTypeDef htim8;
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern osMessageQueueId_t telemetryQueueHandle;
 extern volatile float imuHeading;
 
 static volatile float odom_x = 0.0f;
 static volatile float odom_y = 0.0f;
 
-static const int16_t NUM_MOTORS = 6;
+#define NUM_MOTORS 6
 static const MotorInstance motors[] = {
 	{{&htim8, TIM_CHANNEL_1}, {GPIOC, GPIO_PIN_4},  {&hadc1, ADC_CHANNEL_14}, &htim5},
 	{{&htim8, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_5},  {&hadc1, ADC_CHANNEL_15}, &htim3},
@@ -41,14 +42,14 @@ static const MotorInstance motors[] = {
 	{{&htim1, TIM_CHANNEL_2}, {GPIOC, GPIO_PIN_14}, {&hadc1, ADC_CHANNEL_13}, NULL},
 };
 
-static const int32_t NUM_ENCODERS = 4;
+#define NUM_ENCODERS 4
 static const MecanumConfig mecanumConfig = {
 	65 * 0.5 * 0.001, //65mm wheel diameter
 	20 * 0.01 * 0.5, //20cm wheelbase front/rear
 	20 * 0.01 * 0.5, //20cm wheelbase left/right
-	200 * 0.1047, //205 RPM max speed
+	330 * 0.1047, //333 RPM max speed
 	11, //11 PPR encoder
-	56, //1:30 Gear reduction
+	30, //1:30 Gear reduction
 };
 
 static const float PI = 3.1415927f;
@@ -178,7 +179,6 @@ void setAccVref(uint16_t value) {
 }
 
 void StartControlTask(void *argument) {
-
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)rawADCValues, 7);
 
 	HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
@@ -221,7 +221,8 @@ void StartControlTask(void *argument) {
 	odom_msg.twist.twist.angular.x = 0.0;
 	odom_msg.twist.twist.angular.y = 0.0;
 
-	float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
+	static float telemetry_data[TELEMETRY_SIZE] = {0};
+	static float velocitySetpoints[4] = {0}; //FL, FR, BL, BR
 
 	for(;;) {
 	    vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -253,7 +254,7 @@ void StartControlTask(void *argument) {
 
 		if (voltageScaler > 0.75f) voltageScaler = 0.75f; // Maximum safe value 
 
-	    float dutyCycles[4] = {0};
+	    float dutyCycles[NUM_MOTORS] = {0};
 
 	    for (int i=0; i<4; i++) {
 	    	float error = velocitySetpoints[i] - encoderValues[i].velocity_rad_s;
@@ -261,7 +262,7 @@ void StartControlTask(void *argument) {
 	    }
 
 		// If any duty cycle exceeds rated motor voltage, scale them all down proportionally to prevent damage
-		// and maintain commanded velocity directionality.
+		// and maintain commanded velocity directionality. (Drive motors only)
 		float maxDuty = 0.0f;
 		for (int i = 0; i < 4; i++) {
 			float absDuty = fabsf(dutyCycles[i]);
@@ -274,8 +275,18 @@ void StartControlTask(void *argument) {
 			}
 		}
 
+		// Apply voltage scaling to accessory motors
+		dutyCycles[4] *= voltageScaler;
+		dutyCycles[5] *= voltageScaler;
+
 	    // Check current limits
-	    // TODO: implement this
+		float motorCurrents[NUM_MOTORS] = {0};
+		for (int i=0; i<NUM_MOTORS; i++) {
+			// Current feedback: 450uA/A, 1kOhm resistor
+			motorCurrents[i] = (rawADCValues[i] / 4095.0f) * 3.3f / (0.000450f * 1000.0f);
+		}
+	    // TODO: implement active current limiting
+
 
 		// Update PWM outputs
 	    for (int i=0; i<4; i++) {
@@ -283,8 +294,6 @@ void StartControlTask(void *argument) {
 	    }
 
 	    // Update forward kinematics
-	    // TODO: implement this
-
 		uint64_t now = (uint64_t)xTaskGetTickCount();
 		odom_msg.header.stamp.sec = now / 1000;
 		odom_msg.header.stamp.nanosec = (now % 1000) * 1000000;
@@ -293,5 +302,20 @@ void StartControlTask(void *argument) {
 
 	    osMessageQueueReset(odomQueueHandle);
 	    osMessageQueuePut(odomQueueHandle, &odom_msg, 0, 0);
+
+	    // Update telemetry values
+	    telemetry_data[IDX_BATTERY] = vBatt;
+	    for (int i=0; i<NUM_ENCODERS; i++) {
+	    	telemetry_data[IDX_M1_SPEED + i] = encoderValues[i].velocity_rad_s;
+	    	telemetry_data[IDX_M1_SETPOINT + i] = velocitySetpoints[i];
+
+	    }
+	    for (int i=0; i<NUM_MOTORS; i++) {
+	    	telemetry_data[IDX_M1_OUTPUT + i] = dutyCycles[i];
+	    	telemetry_data[IDX_M1_CURRENT + i] = motorCurrents[i];
+	    }
+	    osMessageQueueReset(telemetryQueueHandle);
+	    osMessageQueuePut(telemetryQueueHandle, &telemetry_data, 0, 0);
+
 	}
 }
