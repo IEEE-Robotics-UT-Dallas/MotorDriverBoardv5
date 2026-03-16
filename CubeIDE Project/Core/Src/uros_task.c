@@ -241,6 +241,7 @@ void StartuROSTask(void *argument) {
 		&twist_sub_callback,
 		ON_NEW_DATA
 	);
+
 	static std_msgs__msg__Float32 acc1_msg;
 	rclc_executor_add_subscription(
 		&executor,
@@ -258,6 +259,11 @@ void StartuROSTask(void *argument) {
 		ON_NEW_DATA
 	);
 	static std_msgs__msg__Float32MultiArray pid_msg;
+	static float pid_msg_buf[5];
+
+	pid_msg.data.data     = pid_msg_buf;
+	pid_msg.data.capacity = 5;
+	pid_msg.data.size     = 0;
 	rclc_executor_add_subscription(
 		&executor,
 		&pid_sub,

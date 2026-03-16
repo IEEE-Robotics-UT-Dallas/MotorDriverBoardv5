@@ -70,10 +70,10 @@ static const MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
 static const MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
 
 static PIDConstants pidConstants = {
-	0.0,  // kP
+	0.15,  // kP
 	0.0,  // kI
 	0.0,  // kD
-	0.05, // Feedforward
+	0.022, // Feedforward
 	1.0   // Integration limit
 };
 
