@@ -25,6 +25,7 @@
 #include "shared_resources.h"
 #include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
+#include <string.h>
 
 #include "control_task.h"
 #include "uros_task.h"
@@ -52,7 +53,10 @@ extern SPI_HandleTypeDef hspi2;
 
 osMessageQueueId_t odomQueueHandle;
 osMessageQueueId_t twistQueueHandle;
+osMessageQueueId_t pidQueueHandle;
 osMessageQueueId_t telemetryQueueHandle;
+osMessageQueueId_t acc1QueueHandle;
+osMessageQueueId_t acc2QueueHandle;
 
 volatile float imuHeading = 0.0f;
 /* USER CODE END Variables */
@@ -119,7 +123,10 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_QUEUES */
   odomQueueHandle = osMessageQueueNew(1, sizeof(nav_msgs__msg__Odometry), NULL);
   twistQueueHandle = osMessageQueueNew(1, sizeof(geometry_msgs__msg__Twist), NULL);
+  pidQueueHandle = osMessageQueueNew(1, sizeof(float) * 5, NULL);
   telemetryQueueHandle = osMessageQueueNew(1, sizeof(float) * TELEMETRY_SIZE, NULL);
+  acc1QueueHandle = osMessageQueueNew(1, sizeof(float), NULL);
+  acc2QueueHandle = osMessageQueueNew(1, sizeof(float), NULL);
   /* USER CODE END RTOS_QUEUES */
   /* creation of controlTask */
   controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);

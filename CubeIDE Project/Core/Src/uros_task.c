@@ -9,6 +9,7 @@
 #include "shared_resources.h"
 
 #include "stm32h5xx_hal.h"
+#include "main.h"
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -22,6 +23,7 @@
 #include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
 #include <std_msgs/msg/float32_multi_array.h>
+#include <std_msgs/msg/float32.h>
 
 bool cubemx_transport_open(struct uxrCustomTransport * transport);
 bool cubemx_transport_close(struct uxrCustomTransport * transport);
@@ -37,7 +39,10 @@ extern UART_HandleTypeDef huart4;
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern osMessageQueueId_t pidQueueHandle;
 extern osMessageQueueId_t telemetryQueueHandle;
+extern osMessageQueueId_t acc1QueueHandle;
+extern osMessageQueueId_t acc2QueueHandle;
 
 rcl_timer_t odom_timer;
 rcl_publisher_t odom_pub;
@@ -47,6 +52,11 @@ rcl_publisher_t telemetry_pub;
 
 rcl_subscription_t twist_sub;
 
+rcl_subscription_t acc1_sub;
+rcl_subscription_t acc2_sub;
+
+rcl_subscription_t pid_sub;
+
 void twist_sub_callback(const void * msgin)
 {
     const geometry_msgs__msg__Twist * msg =
@@ -54,6 +64,35 @@ void twist_sub_callback(const void * msgin)
 
 	osMessageQueueReset(twistQueueHandle);
 	osMessageQueuePut(twistQueueHandle, msg, 0, 0);
+}
+
+void acc1_sub_callback(const void * msgin)
+{
+    const std_msgs__msg__Float32 * msg =
+        (const std_msgs__msg__Float32 *)msgin;
+
+	osMessageQueueReset(acc1QueueHandle);
+	osMessageQueuePut(acc1QueueHandle, &msg->data, 0, 0);
+}
+
+void acc2_sub_callback(const void * msgin)
+{
+    const std_msgs__msg__Float32 * msg =
+        (const std_msgs__msg__Float32 *)msgin;
+
+	osMessageQueueReset(acc2QueueHandle);
+	osMessageQueuePut(acc2QueueHandle, &msg->data, 0, 0);
+}
+
+void pid_sub_callback(const void * msgin)
+{
+    const std_msgs__msg__Float32MultiArray * msg =
+        (const std_msgs__msg__Float32MultiArray *)msgin;
+
+    if (msg == NULL || msg->data.size != 5) return;
+
+	osMessageQueueReset(pidQueueHandle);
+	osMessageQueuePut(pidQueueHandle, msg->data.data, 0, 0);
 }
 
 void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
@@ -158,7 +197,7 @@ void StartuROSTask(void *argument) {
 	rclc_timer_init_default2(
       &telemetry_timer,
       &support,
-      RCL_MS_TO_NS(100),
+      RCL_MS_TO_NS(20),
       telemetry_timer_callback,
 	  true
    );
@@ -170,7 +209,28 @@ void StartuROSTask(void *argument) {
 		"cmd_vel"
 	);
 
-	rclc_executor_init(&executor, &support.context, 3, &allocator);
+	rclc_subscription_init_default(
+		&acc1_sub,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+		"accessory_motor_1"
+	);
+
+	rclc_subscription_init_default(
+		&acc2_sub,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+		"accessory_motor_2"
+	);
+
+	rclc_subscription_init_default(
+		&pid_sub,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+		"pid_constants"
+	);
+
+	rclc_executor_init(&executor, &support.context, 6, &allocator);
 	rclc_executor_add_timer(&executor, &odom_timer);
 	rclc_executor_add_timer(&executor, &telemetry_timer);
 	static geometry_msgs__msg__Twist twist_msg;
@@ -179,6 +239,30 @@ void StartuROSTask(void *argument) {
 		&twist_sub,
 		&twist_msg,
 		&twist_sub_callback,
+		ON_NEW_DATA
+	);
+	static std_msgs__msg__Float32 acc1_msg;
+	rclc_executor_add_subscription(
+		&executor,
+		&acc1_sub,
+		&acc1_msg,
+		&acc1_sub_callback,
+		ON_NEW_DATA
+	);
+	static std_msgs__msg__Float32 acc2_msg;
+	rclc_executor_add_subscription(
+		&executor,
+		&acc2_sub,
+		&acc2_msg,
+		&acc2_sub_callback,
+		ON_NEW_DATA
+	);
+	static std_msgs__msg__Float32MultiArray pid_msg;
+	rclc_executor_add_subscription(
+		&executor,
+		&pid_sub,
+		&pid_msg,
+		&pid_sub_callback,
 		ON_NEW_DATA
 	);
 

@@ -12,7 +12,10 @@
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern osMessageQueueId_t pidQueueHandle;
 extern osMessageQueueId_t telemetryQueueHandle;
+extern osMessageQueueId_t acc1QueueHandle;
+extern osMessageQueueId_t acc2QueueHandle;
 extern volatile float imuHeading;
 
 // Telemetry

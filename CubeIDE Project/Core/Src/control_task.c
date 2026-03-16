@@ -13,6 +13,7 @@
 
 #include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
+#include <rosidl_runtime_c/string_functions.h>
 
 extern ADC_HandleTypeDef hadc1;
 extern DAC_HandleTypeDef hdac1;
@@ -26,7 +27,10 @@ extern TIM_HandleTypeDef htim8;
 
 extern osMessageQueueId_t odomQueueHandle;
 extern osMessageQueueId_t twistQueueHandle;
+extern osMessageQueueId_t pidQueueHandle;
 extern osMessageQueueId_t telemetryQueueHandle;
+extern osMessageQueueId_t acc1QueueHandle;
+extern osMessageQueueId_t acc2QueueHandle;
 extern volatile float imuHeading;
 
 static volatile float odom_x = 0.0f;
@@ -52,8 +56,10 @@ static const MecanumConfig mecanumConfig = {
 	30, //1:30 Gear reduction
 };
 
+static const float dt = 0.001f;
+
 static const float PI = 3.1415927f;
-static const float ENCODER_VEL_CONSTANT = 2.0f * PI / (4.0f * mecanumConfig.encoder_ppr * mecanumConfig.gear_reduction * 0.001f);
+static const float ENCODER_VEL_CONSTANT = 2.0f * PI / (4.0f * mecanumConfig.encoder_ppr * mecanumConfig.gear_reduction * dt);
 static const float ENCODER_ALPHA = 0.2;
 
 static const MotorDACChannel drvVref = {&hdac1, DAC_CHANNEL_1};
@@ -63,11 +69,12 @@ static const MotorDigitalPin nSleep = {GPIOC, GPIO_PIN_11};
 static const MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
 static const MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
 
-static const PIDConstants pidConstants = {
-	0.0,
-	0.0,
-	0.0,
-	0.05
+static PIDConstants pidConstants = {
+	0.0,  // kP
+	0.0,  // kI
+	0.0,  // kD
+	0.05, // Feedforward
+	1.0   // Integration limit
 };
 
 volatile EncoderValues encoderValues[4] = {0};
@@ -76,7 +83,7 @@ volatile PIDController pidControllers[4] = {0};
 volatile uint16_t rawADCValues[7] = {0};
 volatile float velocityTarget[3] = {0, 0, 0};
 
-void updateEncoder(MotorInstance *motor, EncoderValues *encoder) {
+void updateEncoder(const MotorInstance *motor, volatile EncoderValues *encoder) {
 	if (motor->encoder_htim == NULL) return;
 
 	uint16_t timer_counter = __HAL_TIM_GET_COUNTER(motor->encoder_htim);
@@ -97,20 +104,21 @@ void updateEncoder(MotorInstance *motor, EncoderValues *encoder) {
 	encoder->velocity_rad_s = (ENCODER_ALPHA * raw_vel_rad_s) + ((1.0f - ENCODER_ALPHA) * encoder->velocity_rad_s);
 }
 
-float updatePID(PIDController *controller, PIDConstants *constants, float setpoint, float error, float limit) {
-	// TODO: consider using D term based on output instead of error
+float updatePID(volatile PIDController *controller, PIDConstants *constants, float setpoint, float measurement) {
+	float error = setpoint - measurement;
 
-	controller->integral += error * 0.001f;
+	controller->integral += error * dt;
 
-	if (controller->integral > limit) controller->integral = limit;
-	else if (controller->integral < -limit) controller->integral = -limit;
+	if (controller->integral > constants->limit) controller->integral = constants->limit;
+	else if (controller->integral < -constants->limit) controller->integral = -constants->limit;
 
-	float derivative = (error - controller->prevError);
-	controller->prevError = error;
+	float derivative = -(measurement - controller->prevMeasurement);
+	controller->prevMeasurement = measurement;
 
-	float output = (constants->kP * error) + (constants->kI * controller->integral) + (constants->kD * derivative) + (constants->kF * setpoint);
-
-	return output;
+	return (constants->kP * error)
+		+ (constants->kI * controller->integral)
+		+ (constants->kD * derivative)
+		+ (constants->kF * setpoint);
 }
 
 void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
@@ -134,9 +142,9 @@ void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
     float v_x_odom = v_x * cos_h - v_y * sin_h;
     float v_y_odom = v_x * sin_h + v_y * cos_h;
 
-    // Integrate position (dt = 1ms = 0.001s)
-    odom_x += v_x_odom * 0.001f;
-    odom_y += v_y_odom * 0.001f;
+    // Integrate position
+    odom_x += v_x_odom * dt;
+    odom_y += v_y_odom * dt;
 
     // Position
     odom->pose.pose.position.x = odom_x;
@@ -150,7 +158,7 @@ void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
     odom->twist.twist.angular.z = v_z;
 }
 
-void setMotorDutyCycle(MotorInstance *motor, float dutyCycle)
+void setMotorDutyCycle(const MotorInstance *motor, float dutyCycle)
 {
 	if (dutyCycle > 1.0f) dutyCycle = 1.0f;
 	else if (dutyCycle < -1.0f) dutyCycle = -1.0f;
@@ -171,11 +179,11 @@ void setMotorsEnabled(uint8_t enabled) {
 }
 
 void setDrvVref(uint16_t value) {
-	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, value);
+	HAL_DAC_SetValue(drvVref.hdac, drvVref.channel, DAC_ALIGN_12B_R, value);
 }
 
 void setAccVref(uint16_t value) {
-	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R, value);
+	HAL_DAC_SetValue(accVref.hdac, accVref.channel, DAC_ALIGN_12B_R, value);
 }
 
 void StartControlTask(void *argument) {
@@ -205,6 +213,10 @@ void StartControlTask(void *argument) {
 	TickType_t xLastWakeTime = xTaskGetTickCount();
 
 	static geometry_msgs__msg__Twist twist_msg;
+
+	static float pid_msg[5];
+	static float acc1_dutyCycle;
+	static float acc2_dutyCycle;
 
 	static nav_msgs__msg__Odometry odom_msg;
 	nav_msgs__msg__Odometry__init(&odom_msg);
@@ -247,6 +259,29 @@ void StartControlTask(void *argument) {
 			velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z)); // BR
 		}
 
+		// Check for PID values
+		status = osMessageQueueGet(pidQueueHandle, &pid_msg, NULL, 0);
+		if (status == osOK) {
+			pidConstants.kP = pid_msg[0];
+			pidConstants.kI = pid_msg[1];
+			pidConstants.kD = pid_msg[2];
+			pidConstants.kF = pid_msg[3];
+			pidConstants.limit = pid_msg[4];
+		}
+
+		// Check for accessory motor values
+		status = osMessageQueueGet(acc1QueueHandle, &acc1_dutyCycle, NULL, 0);
+		if (status == osOK) {
+			if (acc1_dutyCycle > 1.0) acc1_dutyCycle = 1.0;
+			if (acc1_dutyCycle < -1.0) acc1_dutyCycle = -1.0;
+		}
+
+		status = osMessageQueueGet(acc2QueueHandle, &acc2_dutyCycle, NULL, 0);
+		if (status == osOK) {
+			if (acc2_dutyCycle > 1.0) acc2_dutyCycle = 1.0;
+			if (acc2_dutyCycle < -1.0) acc2_dutyCycle = -1.0;
+		}
+
 		// Update motor setpoints
 	    // Note: motor duty cycles should not exceed voltageScaler to prevent damage
 	    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
@@ -257,9 +292,10 @@ void StartControlTask(void *argument) {
 	    float dutyCycles[NUM_MOTORS] = {0};
 
 	    for (int i=0; i<4; i++) {
-	    	float error = velocitySetpoints[i] - encoderValues[i].velocity_rad_s;
-	    	dutyCycles[i] = updatePID(&pidControllers[i], &pidConstants, velocitySetpoints[i], error, 1.0);
+	    	dutyCycles[i] = updatePID(&pidControllers[i], &pidConstants, velocitySetpoints[i], encoderValues[i].velocity_rad_s);
 	    }
+	    dutyCycles[4] = acc1_dutyCycle;
+		dutyCycles[5] = acc2_dutyCycle;
 
 		// If any duty cycle exceeds rated motor voltage, scale them all down proportionally to prevent damage
 		// and maintain commanded velocity directionality. (Drive motors only)
@@ -289,7 +325,7 @@ void StartControlTask(void *argument) {
 
 
 		// Update PWM outputs
-	    for (int i=0; i<4; i++) {
+	    for (int i=0; i<NUM_MOTORS; i++) {
 	    	setMotorDutyCycle(&motors[i], dutyCycles[i]);
 	    }
 

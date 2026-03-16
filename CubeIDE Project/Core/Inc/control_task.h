@@ -56,12 +56,12 @@ typedef struct {
     float kI;
     float kD;
     float kF;
+    float limit;
 } PIDConstants;
 
 typedef struct {
     float integral;
-    float prevError;
-    float limit;
+    float prevMeasurement;
 } PIDController;
 
 // Data structures
