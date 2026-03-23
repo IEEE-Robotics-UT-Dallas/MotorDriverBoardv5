@@ -49,8 +49,8 @@ static const MotorInstance motors[] = {
 #define NUM_ENCODERS 4
 static const MecanumConfig mecanumConfig = {
 	65 * 0.5 * 0.001, //65mm wheel diameter
-	20 * 0.01 * 0.5, //20cm wheelbase front/rear
-	20 * 0.01 * 0.5, //20cm wheelbase left/right
+	11.975 * 0.01 * 0.5, //11.975cm wheelbase front/rear
+	19.5 * 0.01 * 0.5, //20cm wheelbase left/right
 	330 * 0.1047, //333 RPM max speed
 	11, //11 PPR encoder
 	30, //1:30 Gear reduction
@@ -68,6 +68,12 @@ static const MotorDACChannel accVref = {&hdac1, DAC_CHANNEL_2};
 static const MotorDigitalPin nSleep = {GPIOC, GPIO_PIN_11};
 static const MotorDigitalPin drvFault = {GPIOC, GPIO_PIN_10};
 static const MotorDigitalPin accFault = {GPIOB, GPIO_PIN_0};
+
+// Motor port numbers
+#define FL 1
+#define FR 0
+#define BL 2
+#define BR 3
 
 static PIDConstants pidConstants = {
 	0.15,  // kP
@@ -122,11 +128,11 @@ float updatePID(volatile PIDController *controller, PIDConstants *constants, flo
 }
 
 void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
-    // Wheel velocities in rad/s (FL, FR, BL, BR)
-    float w_fl = encoderValues[0].velocity_rad_s;
-    float w_fr = encoderValues[1].velocity_rad_s;
-    float w_bl = encoderValues[2].velocity_rad_s;
-    float w_br = encoderValues[3].velocity_rad_s;
+    // Wheel velocities in rad/s
+    float w_fl = encoderValues[FL].velocity_rad_s;
+    float w_fr = encoderValues[FR].velocity_rad_s;
+    float w_bl = encoderValues[BL].velocity_rad_s;
+    float w_br = encoderValues[BR].velocity_rad_s;
 
     float r = mecanumConfig.wheel_radius_m;
     float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
@@ -253,10 +259,10 @@ void StartControlTask(void *argument) {
 
 			float v_x = twist_msg.linear.x, v_y = twist_msg.linear.y, v_z = twist_msg.angular.z;
 
-			velocitySetpoints[0] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f; // FL
-			velocitySetpoints[1] = (inv_r * (v_x + v_y + k * v_z)); // FR
-			velocitySetpoints[2] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f; // BL
-			velocitySetpoints[3] = (inv_r * (v_x - v_y + k * v_z)); // BR
+			velocitySetpoints[FL] = (inv_r * (v_x - v_y - k * v_z)) * -1.0f; // FL
+			velocitySetpoints[FR] = (inv_r * (v_x + v_y + k * v_z)); // FR
+			velocitySetpoints[BL] = (inv_r * (v_x + v_y - k * v_z)) * -1.0f; // BL
+			velocitySetpoints[BR] = (inv_r * (v_x - v_y + k * v_z)); // BR
 		}
 
 		// Check for PID values
