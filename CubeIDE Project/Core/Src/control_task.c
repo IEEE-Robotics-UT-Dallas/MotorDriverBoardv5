@@ -50,7 +50,7 @@ static const MotorInstance motors[] = {
 static const MecanumConfig mecanumConfig = {
 	65 * 0.5 * 0.001, //65mm wheel diameter
 	11.975 * 0.01 * 0.5, //11.975cm wheelbase front/rear
-	19.5 * 0.01 * 0.5, //20cm wheelbase left/right
+	19.5 * 0.01 * 0.5, //19.5cm wheelbase left/right
 	330 * 0.1047, //333 RPM max speed
 	11, //11 PPR encoder
 	30, //1:30 Gear reduction
@@ -129,17 +129,17 @@ float updatePID(volatile PIDController *controller, PIDConstants *constants, flo
 
 void updateForwardKinematics(nav_msgs__msg__Odometry *odom) {
     // Wheel velocities in rad/s
-    float w_fl = encoderValues[FL].velocity_rad_s;
+    float w_fl = encoderValues[FL].velocity_rad_s * -1.0f;
     float w_fr = encoderValues[FR].velocity_rad_s;
-    float w_bl = encoderValues[BL].velocity_rad_s;
+    float w_bl = encoderValues[BL].velocity_rad_s * -1.0f;
     float w_br = encoderValues[BR].velocity_rad_s;
 
     float r = mecanumConfig.wheel_radius_m;
     float k = mecanumConfig.lx_m + mecanumConfig.ly_m;
 
     // Mecanum forward kinematics (body-frame velocities)
-    float v_x =  r * 0.25f * ( w_fl + w_fr + w_bl + w_br) * -1.0f;
-    float v_y =  r * 0.25f * (-w_fl + w_fr + w_bl - w_br) * -1.0f;
+    float v_x =  r * 0.25f * ( w_fl + w_fr + w_bl + w_br);
+    float v_y =  r * 0.25f * (-w_fl + w_fr + w_bl - w_br);
     float v_z =  r * 0.25f * (-w_fl + w_fr - w_bl + w_br) / k;
 
     // Rotate body-frame linear velocity into odom frame using IMU heading
