@@ -89,6 +89,14 @@ volatile PIDController pidControllers[4] = {0};
 volatile uint16_t rawADCValues[7] = {0};
 volatile float velocityTarget[3] = {0, 0, 0};
 
+static float softCurrentLimits[6] = {4, 4, 4, 4, 3, 3};
+static float drvHardCurrentLimit = 7;
+static float accHardCurrentLimit = 5;
+
+//12 bit, 0 - 3.3V, 450uA/A, 1kOhm resistor
+//Value is in Amps per LSB
+static const float CURRENT_SCALE_FACTOR = (1 / 4095.0f) * 3.3f / (0.000450f * 1000.0f);
+
 void updateEncoder(const MotorInstance *motor, volatile EncoderValues *encoder) {
 	if (motor->encoder_htim == NULL) return;
 
@@ -184,11 +192,21 @@ void setMotorsEnabled(uint8_t enabled) {
 	HAL_GPIO_WritePin(nSleep.port, nSleep.pin, enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
-void setDrvVref(uint16_t value) {
+void setDrvCurrentLimit(float value_amps) {
+	uint16_t value;
+	if (value_amps <= 0) value = 0;
+	else if (value_amps >= (4095.0f * CURRENT_SCALE_FACTOR)) value = 4095;
+	else value = (uint16_t)(value_amps / CURRENT_SCALE_FACTOR);
+
 	HAL_DAC_SetValue(drvVref.hdac, drvVref.channel, DAC_ALIGN_12B_R, value);
 }
 
-void setAccVref(uint16_t value) {
+void setAccCurrentLimit(float value_amps) {
+	uint16_t value;
+	if (value_amps <= 0) value = 0;
+	else if (value_amps >= (4095.0f * CURRENT_SCALE_FACTOR)) value = 4095;
+	else value = (uint16_t)(value_amps / CURRENT_SCALE_FACTOR);
+
 	HAL_DAC_SetValue(accVref.hdac, accVref.channel, DAC_ALIGN_12B_R, value);
 }
 
@@ -210,8 +228,8 @@ void StartControlTask(void *argument) {
 	HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
 	HAL_DAC_Start(&hdac1, DAC_CHANNEL_2);
 
-	setDrvVref(4095); //No hardware current limiting
-	setAccVref(4095); //No hardware current limiting
+	setDrvCurrentLimit(drvHardCurrentLimit);
+	setAccCurrentLimit(accHardCurrentLimit);
 
 	setMotorsEnabled(1);
 
@@ -293,7 +311,9 @@ void StartControlTask(void *argument) {
 	    float vBatt = (rawADCValues[6] / 4095.0f) * 3.3f * ((22.0f + 100.0f)/22.0f); // Scaled based on voltage divider
 		float voltageScaler = 12.0f / vBatt; //Multiply by this value to get effective 12V
 
-		if (voltageScaler > 0.75f) voltageScaler = 0.75f; // Maximum safe value 
+		if (vBatt < 14.0f || vBatt > 17.3f) {
+			voltageScaler = 0.0f; //Disable outputs if vBatt is not in a safe range
+		}
 
 	    float dutyCycles[NUM_MOTORS] = {0};
 
@@ -325,10 +345,12 @@ void StartControlTask(void *argument) {
 		float motorCurrents[NUM_MOTORS] = {0};
 		for (int i=0; i<NUM_MOTORS; i++) {
 			// Current feedback: 450uA/A, 1kOhm resistor
-			motorCurrents[i] = (rawADCValues[i] / 4095.0f) * 3.3f / (0.000450f * 1000.0f);
+			motorCurrents[i] = rawADCValues[i] * CURRENT_SCALE_FACTOR;
+			if (motorCurrents[i] > softCurrentLimits[i]) {
+				// Scale linearly
+				dutyCycles[i] *= (softCurrentLimits[i]/motorCurrents[i]);
+			}
 		}
-	    // TODO: implement active current limiting
-
 
 		// Update PWM outputs
 	    for (int i=0; i<NUM_MOTORS; i++) {
